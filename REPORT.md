@@ -1,111 +1,133 @@
-# Project Report: House Prices Preprocessing Pipeline & Unit Testing
+# Project Report: Clean Code Preprocessing Pipeline & Unit Testing (`ais-competition-v-3`)
 
-**Competition:** Kaggle — *House Prices: Advanced Regression Techniques*  
+**Competition:** Kaggle — *AIS Competition v3 (Predicting `BeatsPerMinute`)*  
+**Competition Link:** `https://www.kaggle.com/t/31f8ecfe2319647799227b9c7f0b9018`  
 **Author:** Praveen Kumar Koppula  
-**Repository:** `dsp-praveen-koppula`
+**Repository:** [`koppulapraveen250-kpk/kaggle-competition-2`](https://github.com/koppulapraveen250-kpk/kaggle-competition-2)
 
 ---
 
 ## 1. Executive Summary
 
-This report documents the refactoring, industrialization, and unit testing of our machine learning pipeline for the **House Prices: Advanced Regression Techniques** competition. Starting from an exploratory notebook with manual feature transformations, we engineered a clean, modular, production-ready Python pipeline (`house_prices` package and standalone `pipeline.py`) that strictly prevents data leakage, persists fitted preprocessing artifacts (`SimpleImputer`, `StandardScaler`, `OneHotEncoder`), and is verified by an automated unit test suite (`tests/test_preprocess.py`) with 100% pass rate and zero `flake8` linting errors.
+This report presents the design, clean-code implementation, and automated unit testing of our data preprocessing and regression pipeline for **Kaggle Competition 2 (`ais-competition-v-3`)**, where the objective is to predict the tempo (**`BeatsPerMinute`**) of musical tracks from acoustic descriptors.
+
+Our work delivers:
+1. **A Modular Clean-Code Pipeline (`bpm_pipeline/` & `pipeline.py`):** Strictly separates preprocessing, training, and inference, splits data *prior* to fitting any transformers to guarantee zero data leakage, persists fitted artifacts (`imputer.joblib`, `bounds.joblib`, `scaler.joblib`, `model.joblib`), and adheres to PEP 8 (`0` `flake8` warnings/errors) with full type annotations and Google-style docstrings.
+2. **Domain-Driven Audio Feature Engineering:** Expands the $9$ raw acoustic attributes into $16$ standardized features capturing non-linear physical conversions (decibel-to-linear amplitude), tempo-energy couplings, vocal-to-instrumental ratios, and quantile-based outlier clipping.
+3. **Comprehensive Unit Test Suite (`tests/test_preprocess.py`):** $9$ unit tests covering schema validation, feature engineering mathematics, zero-mean/unit-variance scaling, missing-value imputation, out-of-distribution outlier clipping, input DataFrame immutability, missing-artifact error handling, and end-to-end training/inference.
 
 ---
 
-## 2. Dataset & Feature Selection
+## 2. Exploratory Data Analysis & Dataset Overview
 
-The dataset consists of residential property sales in Ames, Iowa:
-- **Training set (`data/train.csv`):** $1,460$ rows $\times$ $81$ columns ($80$ features + target `SalePrice`).
-- **Testing set (`data/test.csv`):** $1,459$ rows $\times$ $80$ feature columns.
-- **Target Variable (`SalePrice`):** Continuous positive sale price in USD, ranging from $\$34,900$ to $\$755,000$ (mean: $\$180,921.20$, median: $\$163,000.00$, std: $\$79,442.50$).
+The dataset contains acoustic measurements across $698,886$ total tracks:
+- **Training Set (`data/train.csv`):** $524,164$ rows $\times$ $11$ columns (`id`, $9$ acoustic features, and target `BeatsPerMinute`).
+- **Test Set (`data/test.csv`):** $174,722$ rows $\times$ $10$ columns (`id` and $9$ acoustic features).
+- **Sample Submission (`data/sample_submission.csv`):** $174,722$ rows $\times$ $2$ columns (`id, BeatsPerMinute`).
 
-### Selected Features
-To build an interpretable, low-latency baseline pipeline, four high-signal features covering property size, land area, location, and architectural style were selected:
-1. **Continuous Features (`CONTINUOUS_FEATURES`):**
-   - `GrLivArea`: Above grade (ground) living area square feet.
-   - `LotArea`: Lot size in square feet.
-2. **Categorical Features (`CATEGORICAL_FEATURES`):**
-   - `Neighborhood`: Physical locations within Ames city limits ($25$ distinct categories in training).
-   - `HouseStyle`: Style of dwelling (e.g., `1Story`, `2Story`, `1.5Fin`; $8$ distinct categories in training).
+### Summary Statistics of Training Data ($N = 524,164$)
+
+| Column | Role | Min | 25% | Median (50%) | Mean | 75% | Max | Std Dev |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `RhythmScore` | Raw Feature | 0.0769 | 0.5158 | 0.6347 | 0.6328 | 0.7392 | 0.9750 | 0.1569 |
+| `AudioLoudness` | Raw Feature (dB) | -27.5097 | -11.5519 | -8.2525 | -8.3790 | -4.9123 | -1.3570 | 4.6162 |
+| `VocalContent` | Raw Feature | 0.0235 | 0.0235 | 0.0664 | 0.0744 | 0.1073 | 0.2564 | 0.0499 |
+| `AcousticQuality` | Raw Feature | 0.000005 | 0.0694 | 0.2425 | 0.2629 | 0.3970 | 0.9950 | 0.2231 |
+| `InstrumentalScore` | Raw Feature | 0.000001 | 0.000001 | 0.0742 | 0.1177 | 0.2041 | 0.8693 | 0.1318 |
+| `LivePerformanceLikelihood` | Raw Feature | 0.0243 | 0.0776 | 0.1663 | 0.1784 | 0.2689 | 0.5999 | 0.1182 |
+| `MoodScore` | Raw Feature | 0.0256 | 0.4039 | 0.5648 | 0.5558 | 0.7166 | 0.9780 | 0.2255 |
+| `TrackDurationMs` | Raw Feature (ms) | 63,973.0 | 207,099.9 | 243,684.1 | 241,903.7 | 281,851.7 | 464,723.2 | 59,326.6 |
+| `Energy` | Raw Feature | 0.000067 | 0.2549 | 0.5118 | 0.5009 | 0.7460 | 1.0000 | 0.2900 |
+| **`BeatsPerMinute`** | **Target** | **46.7180** | **101.0704** | **118.7477** | **119.0349** | **136.6866** | **206.0370** | **26.4681** |
+
+### Key Data Quality Observations
+1. **Scale Disparity:** Features span vastly different orders of magnitude—`TrackDurationMs` reaches $464,723\text{ ms}$, `AudioLoudness` is negative in decibels ($[-27.51, -1.36]\text{ dB}$), while `InstrumentalScore` and `AcousticQuality` have floor values near $10^{-6}$. Standardization (`StandardScaler`) is essential for regularized linear models and stable gradient updates.
+2. **Boundary Floor Clumping & Skewed Ratios:** Several features (`VocalContent` at $0.0235$, `InstrumentalScore` at $1.07 \times 10^{-6}$, `LivePerformanceLikelihood` at $0.0243$) exhibit lower-bound floor clamping, which can create extreme spikes when computing ratios unless protected by smoothing ($\epsilon = 10^{-5}$) and quantile outlier clipping.
+3. **Weak Individual Linear Correlations:** Individual Pearson correlations with `BeatsPerMinute` are small (`MoodScore`: $+0.0071$, `TrackDurationMs`: $+0.0066$, `RhythmScore`: $+0.0054$, `Energy`: $-0.0044$), indicating that non-linear interactions and tree-based ensembles (`HistGradientBoostingRegressor`) are better suited than purely additive linear models.
 
 ---
 
 ## 3. Clean Code Pipeline Architecture
 
-Our refactored codebase provides two complementary implementations:
-1. **Modular Package (`house_prices/`):** Follows strict production separation between preprocessing, training, and inference without cross-dependencies between `train.py` and `inference.py`. Every function is kept concise ($\le 10$ lines of body code), type-annotated, and documented with Google-style docstrings.
-2. **Unified Scikit-Learn Pipeline (`pipeline.py`):** Encapsulates imputation, scaling, one-hot encoding, and regression inside a single `ColumnTransformer` + `Pipeline` workflow.
+Our project is structured into a modular Python package (`bpm_pipeline/`), a unified scikit-learn `Pipeline` module (`pipeline.py`), and an isolated unit test suite (`tests/`):
 
-```
-dsp-praveen-koppula/
-├── house_prices/
-│   ├── __init__.py          # Feature constants, target name, and MODELS_DIR path
-│   ├── preprocess.py        # Imputation, scaling, one-hot encoding, artifact I/O
-│   ├── train.py             # Train/validation split, model fitting, RMSLE evaluation
-│   └── inference.py         # Artifact loading and batch prediction on test data
-├── pipeline.py              # End-to-end scikit-learn ColumnTransformer & Pipeline
+```text
+kaggle-competition-2/
+├── bpm_pipeline/
+│   ├── __init__.py          # Feature lists (9 raw + 7 engineered), target, MODELS_DIR
+│   ├── preprocess.py        # Schema validation, imputation, feature engineering, clipping, scaling
+│   ├── train.py             # Train/val split, model training (HGBR / Ridge), metric computation
+│   └── inference.py         # Artifact loading, batch test prediction, submission export
+├── pipeline.py              # Standalone scikit-learn Pipeline (SimpleImputer -> FunctionTransformer -> StandardScaler -> HGBR)
 ├── tests/
 │   ├── __init__.py
-│   └── test_preprocess.py   # 8 unit tests covering preprocessing & pipeline invariants
-├── models/                  # Persisted joblib artifacts (imputers, scaler, encoder, model)
-├── REPORT.md                # Technical report of work and experimental results
-└── requirements.txt         # Locked environment dependencies
+│   └── test_preprocess.py   # 9 unit tests validating every stage of the preprocessing pipeline
+├── models/                  # Persisted joblib artifacts (imputer, bounds, scaler, model)
+├── REPORT.md                # Full technical report
+├── README.md                # Quick-start instructions
+└── requirements.txt         # Locked package dependencies
 ```
 
-### Key Clean-Code & Anti-Leakage Design Principles
-- **Split Before Preprocessing (Zero Data Leakage):** The dataset is split into `X_train` ($1,168$ rows, $80\%$) and `X_val` ($292$ rows, $20\%$) *before* any statistics (medians, means, variances, or category vocabularies) are computed.
-- **Train vs. Inference Separation (`is_training` flag):**
-  - When `is_training=True`, `preprocess()` fits `SimpleImputer(strategy="median")` and `StandardScaler()` on continuous columns, and `SimpleImputer(strategy="most_frequent")` and `OneHotEncoder(handle_unknown="ignore", sparse_output=False)` on categorical columns, persisting all four transformers to `models/*.joblib`.
-  - When `is_training=False`, `preprocess()` never calls `.fit()`; it loads the persisted transformers from disk and applies `.transform()`.
-- **Immutability:** Input DataFrames are never mutated in place. `preprocess()` returns a newly constructed DataFrame with deterministic column names (`GrLivArea`, `LotArea`, plus one-hot encoded category names) and preserved row indices.
-- **Defensive Error Handling:** Missing input CSV files or missing saved `.joblib` artifacts raise clear, actionable `FileNotFoundError` exceptions.
+### 5-Stage Preprocessing Pipeline (`bpm_pipeline/preprocess.py`)
+1. **Schema Validation (`validate_input_columns`):** Verifies all $9$ required acoustic columns exist in the input DataFrame, raising an explicit `ValueError` if any column is missing.
+2. **Median Imputation (`SimpleImputer(strategy="median")`):** Fitted on training data only to handle any missing or corrupted sensor readings at inference time without data leakage.
+3. **Domain Audio Feature Engineering (`engineer_audio_features`):** Computes $7$ domain-specific features without mutating the input DataFrame:
+   - `Rhythm_Energy_Product` $= \text{RhythmScore} \times \text{Energy}$
+   - `Mood_Rhythm_Product` $= \text{MoodScore} \times \text{RhythmScore}$
+   - `Vocal_to_Instrumental_Ratio` $= \frac{\text{VocalContent}}{\text{InstrumentalScore} + 10^{-5}}$
+   - `Acoustic_Energy_Ratio` $= \frac{\text{AcousticQuality}}{\text{Energy} + 10^{-5}}$
+   - `TrackDurationMinutes` $= \frac{\text{TrackDurationMs}}{60,000}$
+   - `Loudness_Linear` $= 10^{\text{AudioLoudness} / 20}$ (converts logarithmic dB to linear amplitude ratio)
+   - `Energy_Mood_Sum` $= \text{Energy} + \text{MoodScore}$
+4. **Quantile Outlier Clipping (`compute_quantile_bounds` & `clip_outliers`):** Computes the $[0.5\%, 99.5\%]$ quantile bounds on the training fold (`bounds.joblib`) and clips extreme spikes in both training and unseen test data.
+5. **Z-Score Standardization (`StandardScaler`):** Centers all $16$ features to $\mu = 0.0$ and scales to $\sigma = 1.0$ (`scaler.joblib`).
 
 ---
 
 ## 4. Unit Testing the Preprocessing Pipeline
 
-We wrote a comprehensive unit test suite in `tests/test_preprocess.py` using `unittest` and `pytest`. All tests use isolated `tempfile.TemporaryDirectory` fixtures and `unittest.mock.patch` so they never overwrite or depend on local disk state.
+We implemented $9$ self-contained unit tests in `tests/test_preprocess.py` using `unittest` and `pytest`. Every test runs inside an isolated `tempfile.TemporaryDirectory` using `unittest.mock.patch` so that tests are 100% deterministic and never pollute production artifacts.
 
-| Test Case | Purpose & Invariant Verified | Status |
-| :--- | :--- | :---: |
-| `test_preprocess_training_creates_artifacts_and_scales` | Verifies `is_training=True` saves `num_imputer.joblib`, `cat_imputer.joblib`, `scaler.joblib`, and `encoder.joblib`, outputs expected column dimensions, and standardizes continuous features to $\mu = 0.0, \sigma = 1.0$. | **PASSED** |
-| `test_preprocess_inference_handles_unseen_categories` | Verifies `is_training=False` loads saved transformers, matches training feature columns exactly, and encodes unseen test categories (`UnseenNeighborhood`, `UnseenStyle`) as all-zero one-hot vectors without crashing. | **PASSED** |
-| `test_preprocess_imputes_missing_values` | Injects `NaN` / `None` into both continuous and categorical features and verifies that fitted imputers replace all missing values cleanly with zero `NaN`s remaining. | **PASSED** |
-| `test_preprocess_does_not_mutate_input_dataframe` | Asserts via `pd.testing.assert_frame_equal` that the caller's raw DataFrame is completely unmodified after calling `preprocess()`. | **PASSED** |
-| `test_preprocess_inference_without_artifacts_raises_error` | Verifies that running inference before training raises a clear `FileNotFoundError`. | **PASSED** |
-| `test_end_to_end_build_model_and_make_predictions` | Tests `build_model()` and `make_predictions()` end-to-end on temporary CSV files, checking `model.joblib` persistence and prediction array shape. | **PASSED** |
-| `test_sklearn_column_transformer_and_full_pipeline` | Validates the `ColumnTransformer` and `Pipeline` objects in `pipeline.py` on training and unseen test data. | **PASSED** |
-| `test_run_pipeline_generates_submission` | Verifies `run_pipeline()` produces validation metrics and writes a valid `submission.csv` with `Id` and `SalePrice` columns. | **PASSED** |
+| # | Test Name | Invariant Verified | Result |
+| :-: | :--- | :--- | :---: |
+| 1 | `test_validate_input_columns_raises_on_missing_feature` | Dropping a required column (`RhythmScore`) raises a clear `ValueError`. | **PASSED** |
+| 2 | `test_engineer_audio_features_math_and_columns` | Verifies all $16$ column names and exact mathematical formulas for `TrackDurationMinutes` and `Rhythm_Energy_Product`. | **PASSED** |
+| 3 | `test_preprocess_training_creates_artifacts_and_standardizes` | Verifies `is_training=True` saves `imputer.joblib`, `bounds.joblib`, and `scaler.joblib`, and standardizes all $16$ features to $\mu = 0.0, \sigma = 1.0$. | **PASSED** |
+| 4 | `test_preprocess_imputes_missing_nan_values` | Injects `NaN` values into `RhythmScore`, `AcousticQuality`, and `TrackDurationMs` at inference time and verifies clean imputation with zero `NaN` or `inf` outputs. | **PASSED** |
+| 5 | `test_outlier_clipping_bounds_extreme_test_spikes` | Injects extreme test spikes (`TrackDurationMs = 99,999,999`, `AudioLoudness = -999`) and verifies they are clamped to the training quantile bounds. | **PASSED** |
+| 6 | `test_preprocess_does_not_mutate_input_dataframe` | Uses `pd.testing.assert_frame_equal` to guarantee `preprocess()` never mutates the caller's input DataFrame. | **PASSED** |
+| 7 | `test_preprocess_inference_without_artifacts_raises_error` | Verifies calling `preprocess(..., is_training=False)` when artifacts are missing raises `FileNotFoundError`. | **PASSED** |
+| 8 | `test_end_to_end_build_model_and_make_predictions` | Tests `build_model()` and `make_predictions()` end-to-end on CSV files and verifies the generated `submission.csv` schema (`id, BeatsPerMinute`). | **PASSED** |
+| 9 | `test_sklearn_pipeline_and_run_pipeline` | Verifies the standalone `scikit-learn` `Pipeline` (`create_sklearn_preprocessing_pipeline`, `create_full_pipeline`, and `run_pipeline`). | **PASSED** |
 
-### Test & Linter Execution Summary
+### Test & Linter Execution Output
 ```text
 $ pytest -v
-collected 8 items
-tests/test_preprocess.py::TestPreprocessingPipeline::test_end_to_end_build_model_and_make_predictions PASSED [ 12%]
-tests/test_preprocess.py::TestPreprocessingPipeline::test_preprocess_does_not_mutate_input_dataframe PASSED [ 25%]
-tests/test_preprocess.py::TestPreprocessingPipeline::test_preprocess_imputes_missing_values PASSED [ 37%]
-tests/test_preprocess.py::TestPreprocessingPipeline::test_preprocess_inference_handles_unseen_categories PASSED [ 50%]
-tests/test_preprocess.py::TestPreprocessingPipeline::test_preprocess_inference_without_artifacts_raises_error PASSED [ 62%]
-tests/test_preprocess.py::TestPreprocessingPipeline::test_preprocess_training_creates_artifacts_and_scales PASSED [ 75%]
-tests/test_preprocess.py::TestPreprocessingPipeline::test_run_pipeline_generates_submission PASSED [ 87%]
-tests/test_preprocess.py::TestPreprocessingPipeline::test_sklearn_column_transformer_and_full_pipeline PASSED [100%]
-============================== 8 passed in 2.55s ==============================
+============================= test session starts =============================
+collected 9 items
 
-$ flake8 house_prices tests pipeline.py --count --select=E,W,F --max-line-length=120
+tests/test_preprocess.py::TestBPMPreprocessingPipeline::test_end_to_end_build_model_and_make_predictions PASSED [ 11%]
+tests/test_preprocess.py::TestBPMPreprocessingPipeline::test_engineer_audio_features_math_and_columns PASSED [ 22%]
+tests/test_preprocess.py::TestBPMPreprocessingPipeline::test_outlier_clipping_bounds_extreme_test_spikes PASSED [ 33%]
+tests/test_preprocess.py::TestBPMPreprocessingPipeline::test_preprocess_does_not_mutate_input_dataframe PASSED [ 44%]
+tests/test_preprocess.py::TestBPMPreprocessingPipeline::test_preprocess_imputes_missing_nan_values PASSED [ 55%]
+tests/test_preprocess.py::TestBPMPreprocessingPipeline::test_preprocess_inference_without_artifacts_raises_error PASSED [ 66%]
+tests/test_preprocess.py::TestBPMPreprocessingPipeline::test_preprocess_training_creates_artifacts_and_standardizes PASSED [ 77%]
+tests/test_preprocess.py::TestBPMPreprocessingPipeline::test_sklearn_pipeline_and_run_pipeline PASSED [ 88%]
+tests/test_preprocess.py::TestBPMPreprocessingPipeline::test_validate_input_columns_raises_on_missing_feature PASSED [100%]
+
+============================== 9 passed in 7.33s ==============================
+
+$ flake8 bpm_pipeline tests pipeline.py --count --select=E,W,F --max-line-length=120
 0
 ```
 
 ---
 
-## 5. Model Evaluation Results
+## 5. Experimental Results & Submission Verification
 
-Using an 80/20 train/validation split (`random_state=42`) on `data/train.csv`, the pipeline achieved the following validation metrics:
+Running `python pipeline.py` on the full `ais-competition-v-3` dataset ($419,331$ training tracks, $104,833$ validation tracks, and $174,722$ test tracks) with `HistGradientBoostingRegressor` completed in $< 15$ seconds:
 
-| Metric | Value | Interpretation |
-| :--- | :---: | :--- |
-| **RMSLE** (Competition Metric) | **0.2026** (`0.20` rounded) | Root Mean Squared Logarithmic Error; corresponds to $\approx 22\%$ relative error on house price. |
-| **R² Score** | **0.7784** | The 4 selected features explain **$77.84\%$** of the variance in validation house prices. |
-| **MAE** | **$26,551.64** | Mean Absolute Error across validation properties. |
-| **RMSE** | **$41,224.43** | Root Mean Squared Error across validation properties. |
-
-Predictions on the $1,459$ test houses in `data/test.csv` were generated and exported to `submission.csv` (`1,459` rows, columns `Id, SalePrice`, zero missing or negative values).
+- **Validation RMSE:** `26.4398` (improves over the raw target standard deviation of `26.4681`)
+- **Validation MAE:** `21.1824`
+- **Generated `submission.csv`:** `174,722` prediction rows with exact header `id,BeatsPerMinute` and zero missing/NaN values, ready for Kaggle submission.

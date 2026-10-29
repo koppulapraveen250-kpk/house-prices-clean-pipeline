@@ -1,114 +1,78 @@
 """Standalone clean-code preprocessing, training, and inference pipeline.
 
-This script provides a complete, self-contained sklearn Pipeline and
-ColumnTransformer implementation alongside the modular `house_prices` package.
+Implements both the modular `bpm_pipeline` workflow and a scikit-learn
+`Pipeline` using `FunctionTransformer`, `SimpleImputer`, and `StandardScaler`
+for the AIS Competition v3 (BeatsPerMinute prediction) dataset.
 """
-from pathlib import Path
 from typing import Any
 
-import joblib
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_squared_log_error, r2_score
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
-from house_prices import (
-    CATEGORICAL_FEATURES,
-    CONTINUOUS_FEATURES,
+from bpm_pipeline import (
     FEATURE_COLUMNS,
-    LABEL_COLUMN,
-    MODELS_DIR,
+    RAW_FEATURES,
 )
+from bpm_pipeline.inference import make_predictions
+from bpm_pipeline.preprocess import engineer_audio_features
+from bpm_pipeline.train import build_model
 
 
-def create_preprocessing_pipeline(
-    continuous_features: list[str] = CONTINUOUS_FEATURES,
-    categorical_features: list[str] = CATEGORICAL_FEATURES,
-) -> ColumnTransformer:
-    """Create a clean scikit-learn ColumnTransformer for preprocessing.
+def _engineer_from_array(x_arr: np.ndarray) -> pd.DataFrame:
+    """Convert imputed 2D array to DataFrame and compute engineered features."""
+    df = pd.DataFrame(x_arr, columns=RAW_FEATURES)
+    return engineer_audio_features(df)
 
-    Args:
-        continuous_features: List of numerical column names.
-        categorical_features: List of categorical column names.
+
+def create_sklearn_preprocessing_pipeline() -> Pipeline:
+    """Create a clean scikit-learn preprocessing Pipeline.
+
+    Steps:
+        1. Median imputation (`SimpleImputer`) on the 9 raw audio columns.
+        2. Domain feature engineering (`FunctionTransformer`) producing 16 cols.
+        3. Z-score standardization (`StandardScaler`).
 
     Returns:
-        Unfitted ColumnTransformer combining imputation, scaling, and encoding.
+        Unfitted scikit-learn preprocessing Pipeline.
     """
-    numeric_transformer = Pipeline(
+    return Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
+            (
+                "feature_engineer",
+                FunctionTransformer(_engineer_from_array, validate=False),
+            ),
             ("scaler", StandardScaler()),
         ]
     )
-    categorical_transformer = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            (
-                "encoder",
-                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
-            ),
-        ]
-    )
-    return ColumnTransformer(
-        transformers=[
-            ("num", numeric_transformer, continuous_features),
-            ("cat", categorical_transformer, categorical_features),
-        ]
-    )
 
 
-def create_full_pipeline(
-    continuous_features: list[str] = CONTINUOUS_FEATURES,
-    categorical_features: list[str] = CATEGORICAL_FEATURES,
-) -> Pipeline:
+def create_full_pipeline() -> Pipeline:
     """Create a complete end-to-end Pipeline with preprocessing and regressor.
-
-    Args:
-        continuous_features: List of numerical column names.
-        categorical_features: List of categorical column names.
 
     Returns:
         Unfitted scikit-learn Pipeline.
     """
-    preprocessor = create_preprocessing_pipeline(
-        continuous_features, categorical_features
-    )
     return Pipeline(
         steps=[
-            ("preprocessor", preprocessor),
-            ("regressor", LinearRegression()),
+            ("preprocessor", create_sklearn_preprocessing_pipeline()),
+            (
+                "regressor",
+                HistGradientBoostingRegressor(
+                    max_iter=150,
+                    learning_rate=0.05,
+                    max_leaf_nodes=31,
+                    min_samples_leaf=50,
+                    l2_regularization=1.0,
+                    random_state=42,
+                ),
+            ),
         ]
     )
-
-
-def evaluate_predictions(
-    y_true: pd.Series | np.ndarray, y_pred: np.ndarray
-) -> dict[str, float]:
-    """Compute regression evaluation metrics (RMSLE, RMSE, MAE, R2).
-
-    Args:
-        y_true: Ground-truth target values.
-        y_pred: Predicted target values.
-
-    Returns:
-        Dictionary of rounded evaluation metrics.
-    """
-    clipped = np.clip(y_pred, a_min=1.0, a_max=None)
-    rmsle = float(np.sqrt(mean_squared_log_error(y_true, clipped)))
-    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    mae = float(mean_absolute_error(y_true, y_pred))
-    r2 = float(r2_score(y_true, y_pred))
-    return {
-        "rmsle": round(rmsle, 4),
-        "rmse": round(rmse, 2),
-        "mae": round(mae, 2),
-        "r2": round(r2, 4),
-    }
 
 
 def run_pipeline(
@@ -126,32 +90,13 @@ def run_pipeline(
     Returns:
         Dictionary containing validation metrics and submission shape.
     """
-    train_df = pd.read_csv(train_filepath)
-    test_df = pd.read_csv(test_filepath)
-
-    x = train_df[FEATURE_COLUMNS]
-    y = train_df[LABEL_COLUMN]
-    x_train, x_val, y_train, y_val = train_test_split(
-        x, y, test_size=0.2, random_state=42
-    )
-
-    pipeline = create_full_pipeline()
-    pipeline.fit(x_train, y_train)
-
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(pipeline, MODELS_DIR / "full_pipeline.joblib")
-
-    val_preds = pipeline.predict(x_val)
-    metrics = evaluate_predictions(y_val, val_preds)
-
-    test_preds = np.clip(
-        pipeline.predict(test_df[FEATURE_COLUMNS]), a_min=0.0, a_max=None
-    )
-    submission = pd.DataFrame({"Id": test_df["Id"], "SalePrice": test_preds})
-    Path(output_filepath).parent.mkdir(parents=True, exist_ok=True)
-    submission.to_csv(output_filepath, index=False)
-
-    return {"metrics": metrics, "submission_rows": len(submission)}
+    metrics = build_model(train_filepath, model_type="hgbr")
+    preds = make_predictions(test_filepath, output_csv=output_filepath)
+    return {
+        "metrics": metrics,
+        "submission_rows": int(preds.shape[0]),
+        "num_features": len(FEATURE_COLUMNS),
+    }
 
 
 if __name__ == "__main__":
